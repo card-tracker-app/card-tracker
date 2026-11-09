@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>カード請求ウォッチ</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>💳</text></svg>">
+<script src="https://cdn.tailwindcss.com/3.4.17"></script>
+<style>
+:root{--bg:#f3f4f7;--card:#fff;--tx:#1c1f26;--sub:#6b7280;--ac:#4f46e5;--acs:#eef2ff;--bd:#e5e7eb;--danger:#dc2626;
+box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#111318;--card:#1c1f27;--tx:#f1f2f4;--sub:#9aa1ad;--ac:#818cf8;--acs:#262a40;--bd:#2b303b;--danger:#f87171;color-scheme:dark}}
+:root[data-theme="dark"]{--bg:#111318;--card:#1c1f27;--tx:#f1f2f4;--sub:#9aa1ad;--ac:#818cf8;--acs:#262a40;--bd:#2b303b;--danger:#f87171;color-scheme:dark}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+body{background:var(--bg);color:var(--tx);font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Noto Sans JP",sans-serif;margin:0;padding-bottom:84px}
+.c{background:var(--card);border:1px solid var(--bd);border-radius:18px;padding:16px}
+.sub{color:var(--sub)}
+.in{width:100%;background:var(--bg);color:var(--tx);border:1px solid var(--bd);border-radius:12px;padding:12px;font-size:16px;margin-top:4px;box-sizing:border-box;min-height:46px}
+.btn{width:100%;background:var(--ac);color:#fff;border:0;border-radius:14px;padding:14px;font-size:16px;font-weight:600}
+.lbl{font-size:12px;color:var(--sub);display:block;margin-top:12px}
+nav{position:fixed;left:0;right:0;bottom:0;background:var(--card);border-top:1px solid var(--bd);display:flex;padding-bottom:env(safe-area-inset-bottom,0px)}
+nav button{flex:1;padding:10px 0 8px;font-size:11px;color:var(--sub);background:none;border:0}
+nav button.on{color:var(--ac);font-weight:700}
+nav button span{display:block;font-size:20px}
+.del{color:var(--danger);background:none;border:0;font-size:13px;padding:6px}
+.bar{height:6px;border-radius:3px;background:var(--acs);overflow:hidden}
+</style>
+</head>
+<body>
+<div id="app" class="max-w-md mx-auto px-4 pt-5"></div>
+<nav id="nav"></nav>
+
+<script>
+// ===== 1. データの保存・読み込み（ブラウザのlocalStorage。使えない場合はメモリのみ） =====
+let S = { cards: [], exps: [] };
+try { S = JSON.parse(localStorage.getItem('cardTracker') || '') || S; } catch (e) {}
+const save = () => { try { localStorage.setItem('cardTracker', JSON.stringify(S)); } catch (e) {} };
+
+// ===== 2. 日付・金額のユーティリティ =====
+const pad = n => String(n).padStart(2, '0');
+const toS = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+const yen = n => '¥' + Number(n).toLocaleString('ja-JP');
+const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const dayLabel = d => d == 0 ? '月末' : d + '日';
+// y年m月(0始まり)の「d日」。0=月末。存在しない日は月末に丸める（例: 31日→30日）
+const cd = (y, m, d) => { const last = new Date(y, m + 1, 0).getDate(); return new Date(y, m, d == 0 ? last : Math.min(d, last)); };
+
+// ===== 3. 請求期間の計算（このアプリの心臓部） =====
+// カードごとに「締め日で区切った期間」と「その支払日」を前後数か月ぶん作る
+function periods(card, today) {
+  const t = new Date(today + 'T00:00:00'), y = t.getFullYear(), m = t.getMonth(), out = [];
+  for (let k = -3; k <= 1; k++) {
+    const end = cd(y, m + k, card.closing);
+    const start = cd(y, m + k - 1, card.closing); start.setDate(start.getDate() + 1); // 前回締め日の翌日
+    const pay = cd(y, m + k + card.offset, card.payDay);
+    out.push({ s: toS(start), e: toS(end), p: toS(pay) });
+  }
+  return out;
+}
+const sum = (cid, s, e) => S.exps.filter(x => x.cardId === cid && x.date >= s && x.date <= e).reduce((a, x) => a + x.amount, 0);
+function info(card, today) {
+  const ps = periods(card, today);
+  const cur = ps.find(p => p.s <= today && today <= p.e);        // 今の利用期間
+  const next = ps.find(p => p.p >= today);                        // 次の支払日を迎える期間
+  const days = Math.round((new Date(next.p) - new Date(today)) / 864e5);
+  return { cur, curAmt: sum(card.id, cur.s, cur.e), next, nextAmt: sum(card.id, next.s, next.e), days };
+}
+const md = s => `${+s.slice(5, 7)}/${+s.slice(8)}`;
+
+// ===== 4. 画面描画 =====
+let tab = 'home';
+const today = () => toS(new Date());
+const nav = [['home', '📊', 'ホーム'], ['add', '✏️', '記録'], ['cards', '💳', 'カード']];
+
+function render() {
+  document.getElementById('nav').innerHTML = nav.map(([k, i, l]) =>
+    `<button class="${tab === k ? 'on' : ''}" onclick="go('${k}')"><span>${i}</span>${l}</button>`).join('');
+  document.getElementById('app').innerHTML = { home, add, cards }[tab]();
+}
+window.go = k => { tab = k; render(); window.scrollTo(0, 0); };
+
+function home() {
+  if (!S.cards.length) return `<h1 class="text-xl font-bold mb-4">請求の見える化</h1>
+    <div class="c text-center"><p class="sub mb-4">まずはカードを登録しましょう</p><button class="btn" onclick="go('cards')">カードを登録する</button></div>`;
+  const t = today();
+  const rows = S.cards.map(c => ({ c, i: info(c, t) })).sort((a, b) => a.i.next.p.localeCompare(b.i.next.p));
+  const total = rows.reduce((a, r) => a + r.i.nextAmt, 0);
+  const max = Math.max(...rows.map(r => r.i.nextAmt), 1);
+  return `<h1 class="text-xl font-bold mb-3">請求の見える化</h1>
+  <div class="c mb-4" style="background:var(--ac);color:#fff;border:0">
+    <div style="opacity:.85;font-size:13px">次回支払い額の合計（全カード）</div>
+    <div class="text-4xl font-bold mt-1">${yen(total)}</div>
+  </div>
+  <div class="space-y-3">${rows.map(({ c, i }) => `
+    <div class="c">
+      <div class="flex justify-between items-start">
+        <div><div class="font-bold text-lg">${esc(c.name)}</div>
+        <div class="sub text-xs">締め ${dayLabel(c.closing)} ／ 支払 ${c.offset === 1 ? '翌月' : '翌々月'}${dayLabel(c.payDay)}</div></div>
+        <div class="text-right"><div class="sub text-xs">今期の利用額</div><div class="font-semibold">${yen(i.curAmt)}</div>
+        <div class="sub" style="font-size:11px">${md(i.cur.s)}〜${md(i.cur.e)}</div></div>
+      </div>
+      <div class="mt-3 p-3 rounded-xl" style="background:var(--acs)">
+        <div class="flex justify-between text-sm"><span class="sub">次の支払日</span>
+          <b>${md(i.next.p)}（${i.days === 0 ? '本日' : 'あと' + i.days + '日'}）</b></div>
+        <div class="flex justify-between text-sm mt-1"><span class="sub">引き落とし口座</span><b>${esc(c.bank)}</b></div>
+        <div class="flex justify-between items-end mt-2"><span class="sub text-sm">請求額</span>
+          <b class="text-2xl" style="color:var(--ac)">${yen(i.nextAmt)}</b></div>
+        <div class="bar mt-2"><div style="height:100%;width:${Math.round(i.nextAmt / max * 100)}%;background:var(--ac)"></div></div>
+      </div>
+    </div>`).join('')}</div>`;
+}
+
+function add() {
+  if (!S.cards.length) return `<h1 class="text-xl font-bold mb-4">支出を記録</h1><div class="c text-center sub">先にカードを登録してください</div>`;
+  const list = [...S.exps].sort((a, b) => b.date.localeCompare(a.date) || b.id - a.id).slice(0, 30);
+  const nm = id => (S.cards.find(c => c.id === id) || { name: '（削除済）' }).name;
+  return `<h1 class="text-xl font-bold mb-3">支出を記録</h1>
+  <div class="c">
+    <label class="lbl" style="margin-top:0">金額（円）</label>
+    <input id="amt" class="in" type="number" inputmode="numeric" placeholder="3000">
+    <label class="lbl">利用日</label>
+    <input id="dt" class="in" type="date" value="${today()}">
+    <label class="lbl">利用したカード</label>
+    <select id="cid" class="in">${S.cards.map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select>
+    <label class="lbl">メモ（店舗名など）</label>
+    <input id="memo" class="in" type="text" placeholder="コンビニ">
+    <button class="btn mt-4" onclick="addExp()">記録する</button>
+  </div>
+  <h2 class="font-bold mt-6 mb-2">最近の記録</h2>
+  <div class="space-y-2">${list.map(x => `
+    <div class="c flex justify-between items-center" style="padding:10px 14px">
+      <div><div class="font-semibold">${yen(x.amount)}</div>
+      <div class="sub text-xs">${md(x.date)} ・ ${esc(nm(x.cardId))}${x.memo ? ' ・ ' + esc(x.memo) : ''}</div></div>
+      <button class="del" onclick="delExp(${x.id})">削除</button>
+    </div>`).join('') || '<div class="sub text-sm">まだ記録がありません</div>'}</div>`;
+}
+
+const opts = (arr, sel) => arr.map(([v, l]) => `<option value="${v}" ${v == sel ? 'selected' : ''}>${l}</option>`).join('');
+const days = Array.from({ length: 31 }, (_, i) => [i + 1, i + 1 + '日']).concat([[0, '月末']]);
+
+function cards() {
+  return `<h1 class="text-xl font-bold mb-3">カード・口座の登録</h1>
+  <div class="c">
+    <label class="lbl" style="margin-top:0">カード名</label>
+    <input id="cn" class="in" type="text" placeholder="楽天カード">
+    <label class="lbl">引き落とし口座名</label>
+    <input id="bk" class="in" type="text" placeholder="○○銀行">
+    <label class="lbl">締め日</label>
+    <select id="cl" class="in">${opts(days, 15)}</select>
+    <label class="lbl">支払日</label>
+    <div class="flex gap-2">
+      <select id="of" class="in" style="flex:1">${opts([[1, '翌月'], [2, '翌々月']], 1)}</select>
+      <select id="pd" class="in" style="flex:1">${opts(days, 10)}</select>
+    </div>
+    <button class="btn mt-4" onclick="addCard()">登録する</button>
+  </div>
+  <h2 class="font-bold mt-6 mb-2">登録済み</h2>
+  <div class="space-y-2">${S.cards.map(c => `
+    <div class="c flex justify-between items-center" style="padding:12px 14px">
+      <div><div class="font-semibold">${esc(c.name)} <span class="sub text-xs">→ ${esc(c.bank)}</span></div>
+      <div class="sub text-xs">締め ${dayLabel(c.closing)} ／ ${c.offset === 1 ? '翌月' : '翌々月'}${dayLabel(c.payDay)}払い</div></div>
+      <button class="del" onclick="delCard(${c.id})">削除</button>
+    </div>`).join('') || '<div class="sub text-sm">まだ登録がありません</div>'}</div>`;
+}
+
+// ===== 5. 操作（追加・削除） =====
+const $ = id => document.getElementById(id).value;
+window.addCard = () => {
+  const name = $('cn').trim(), bank = $('bk').trim();
+  if (!name || !bank) return alert('カード名と口座名を入力してください');
+  S.cards.push({ id: Date.now(), name, bank, closing: +$('cl'), offset: +$('of'), payDay: +$('pd') });
+  save(); go('home');
+};
+window.delCard = id => {
+  if (!confirm('このカードと、その支出記録をすべて削除しますか？')) return;
+  S.cards = S.cards.filter(c => c.id !== id); S.exps = S.exps.filter(x => x.cardId !== id); save(); render();
+};
+window.addExp = () => {
+  const amount = Math.round(+$('amt')), date = $('dt');
+  if (!amount || amount <= 0 || !date) return alert('金額と利用日を入力してください');
+  S.exps.push({ id: Date.now(), amount, date, cardId: +$('cid'), memo: $('memo').trim() });
+  save(); go('home');
+};
+window.delExp = id => { S.exps = S.exps.filter(x => x.id !== id); save(); render(); };
+
+render();
+</script>
+</body>
+</html>
