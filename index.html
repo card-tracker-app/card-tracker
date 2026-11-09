@@ -16,6 +16,7 @@ body{background:var(--bg);color:var(--tx);font-family:-apple-system,BlinkMacSyst
 .c{background:var(--card);border:1px solid var(--bd);border-radius:18px;padding:16px}
 .sub{color:var(--sub)}
 .in{width:100%;background:var(--bg);color:var(--tx);border:1px solid var(--bd);border-radius:12px;padding:12px;font-size:16px;margin-top:4px;box-sizing:border-box;min-height:46px}
+input[type=date].in{-webkit-appearance:none;appearance:none;min-width:0;max-width:100%;text-align:left}
 .btn{width:100%;background:var(--ac);color:#fff;border:0;border-radius:14px;padding:14px;font-size:16px;font-weight:600}
 .lbl{font-size:12px;color:var(--sub);display:block;margin-top:12px}
 nav{position:fixed;left:0;right:0;bottom:0;background:var(--card);border-top:1px solid var(--bd);display:flex;padding-bottom:env(safe-area-inset-bottom,0px)}
@@ -79,33 +80,58 @@ function render() {
 }
 window.go = k => { tab = k; render(); window.scrollTo(0, 0); };
 
+// ===== 月ごとの表示：vm = 今月からのずれ（0=今月、-1=先月、+1=来月）=====
+let vm = 0;
+const mon = o => { const t = new Date(); return new Date(t.getFullYear(), t.getMonth() + o, 1); };
+// カードごとに「T月に支払日が来る請求」の期間と金額を求める
+function billFor(card, T) {
+  const y = T.getFullYear(), m = T.getMonth(), em = m - card.offset;   // 締め月 = 支払月 - (1 or 2)
+  const end = cd(y, em, card.closing);
+  const start = cd(y, em - 1, card.closing); start.setDate(start.getDate() + 1);
+  const pay = cd(y, m, card.payDay);
+  const s = toS(start), e = toS(end);
+  return { s, e, p: toS(pay), amt: sum(card.id, s, e) };
+}
+window.mv = d => { vm = Math.max(-12, Math.min(12, vm + d)); render(); };
+
 function home() {
-  if (!S.cards.length) return `<h1 class="text-xl font-bold mb-4">請求の見える化</h1>
-    <div class="c text-center"><p class="sub mb-4">まずはカードを登録しましょう</p><button class="btn" onclick="go('cards')">カードを登録する</button></div>`;
-  const t = today();
-  const rows = S.cards.map(c => ({ c, i: info(c, t) })).sort((a, b) => a.i.next.p.localeCompare(b.i.next.p));
-  const total = rows.reduce((a, r) => a + r.i.nextAmt, 0);
-  const max = Math.max(...rows.map(r => r.i.nextAmt), 1);
-  return `<h1 class="text-xl font-bold mb-3">請求の見える化</h1>
+  const T = mon(vm), t = today();
+  const rel = vm === 0 ? '今月' : vm < 0 ? -vm + 'か月前' : vm + 'か月先';
+  const arrow = (d, ch) => `<button style="font-size:28px;color:var(--ac);background:none;border:0;padding:4px 14px" onclick="mv(${d})">${ch}</button>`;
+  const head = `<div class="flex items-center justify-between mb-3">${arrow(-1, '‹')}
+    <div class="text-center"><h1 class="text-lg font-bold">${T.getFullYear()}年${T.getMonth() + 1}月の支払い</h1>
+    <div class="sub" style="font-size:11px">${rel}・左右スワイプで月を移動</div></div>${arrow(1, '›')}</div>`;
+  if (!S.cards.length) return head + `<div class="c text-center"><p class="sub mb-4">まずはカードを登録しましょう</p><button class="btn" onclick="go('cards')">カードを登録する</button></div>`;
+  const rows = S.cards.map(c => ({ c, b: billFor(c, T) })).sort((a, b) => a.b.p.localeCompare(b.b.p));
+  const total = rows.reduce((a, r) => a + r.b.amt, 0);
+  const st = p => p < t ? '支払済' : p === t ? '本日' : 'あと' + Math.round((new Date(p) - new Date(t)) / 864e5) + '日';
+  // 口座ごと・支払日ごとに合計
+  const g = {};
+  rows.forEach(({ c, b }) => { const k = c.bank + '|' + b.p; g[k] = g[k] || { bank: c.bank, p: b.p, amt: 0, names: [] }; g[k].amt += b.amt; g[k].names.push(c.name); });
+  const bl = Object.values(g).sort((a, b) => a.p.localeCompare(b.p));
+  const banks = `<h2 class="font-bold mb-2">口座に入れておく金額</h2><div class="c mb-4" style="padding:4px 16px">${bl.map((b, n) => `
+    <div class="flex justify-between items-center py-3" style="${n ? 'border-top:1px solid var(--bd)' : ''}">
+      <div class="min-w-0"><div class="font-semibold truncate">${esc(b.bank)}</div>
+      <div class="sub text-xs">${md(b.p)}（${st(b.p)}）・${b.names.map(esc).join('、')}</div></div>
+      <b class="text-xl shrink-0 pl-2" style="color:var(--ac)">${yen(b.amt)}</b></div>`).join('')}</div>`;
+  return head + `
   <div class="c mb-4" style="background:var(--ac);color:#fff;border:0">
-    <div style="opacity:.85;font-size:13px">次回支払い額の合計（全カード）</div>
+    <div style="opacity:.85;font-size:13px">この月の支払い合計（全カード）</div>
     <div class="text-4xl font-bold mt-1">${yen(total)}</div>
   </div>
-  <div class="space-y-3">${rows.map(({ c, i }) => `
+  ${banks}
+  <h2 class="font-bold mb-2">カードごとの内訳</h2>
+  <div class="space-y-3">${rows.map(({ c, b }) => `
     <div class="c">
       <div class="flex justify-between items-start">
-        <div><div class="font-bold text-lg">${esc(c.name)}</div>
+        <div class="min-w-0"><div class="font-bold text-lg truncate">${esc(c.name)}</div>
         <div class="sub text-xs">締め ${dayLabel(c.closing)} ／ 支払 ${c.offset === 1 ? '翌月' : '翌々月'}${dayLabel(c.payDay)}</div></div>
-        <div class="text-right"><div class="sub text-xs">今期の利用額</div><div class="font-semibold">${yen(i.curAmt)}</div>
-        <div class="sub" style="font-size:11px">${md(i.cur.s)}〜${md(i.cur.e)}</div></div>
+        <div class="text-right shrink-0 pl-2"><div class="sub text-xs">${md(b.p)}払い</div><div class="font-semibold">${st(b.p)}</div></div>
       </div>
       <div class="mt-3 p-3 rounded-xl" style="background:var(--acs)">
-        <div class="flex justify-between text-sm"><span class="sub">次の支払日</span>
-          <b>${md(i.next.p)}（${i.days === 0 ? '本日' : 'あと' + i.days + '日'}）</b></div>
-        <div class="flex justify-between text-sm mt-1"><span class="sub">引き落とし口座</span><b>${esc(c.bank)}</b></div>
-        <div class="flex justify-between items-end mt-2"><span class="sub text-sm">請求額</span>
-          <b class="text-2xl" style="color:var(--ac)">${yen(i.nextAmt)}</b></div>
-        <div class="bar mt-2"><div style="height:100%;width:${Math.round(i.nextAmt / max * 100)}%;background:var(--ac)"></div></div>
+        <div class="flex justify-between text-sm"><span class="sub">引き落とし口座</span><b>${esc(c.bank)}</b></div>
+        <div class="flex justify-between items-end mt-2"><span class="sub text-sm">請求額<br><span style="font-size:11px">${md(b.s)}〜${md(b.e)}利用分${b.e >= t ? '（集計中）' : ''}</span></span>
+          <b class="text-2xl" style="color:var(--ac)">${yen(b.amt)}</b></div>
       </div>
     </div>`).join('')}</div>`;
 }
@@ -129,8 +155,8 @@ function add() {
   <h2 class="font-bold mt-6 mb-2">最近の記録</h2>
   <div class="space-y-2">${list.map(x => `
     <div class="c flex justify-between items-center" style="padding:10px 14px">
-      <div><div class="font-semibold">${yen(x.amount)}</div>
-      <div class="sub text-xs">${md(x.date)} ・ ${esc(nm(x.cardId))}${x.memo ? ' ・ ' + esc(x.memo) : ''}</div></div>
+      <div class="min-w-0"><div class="font-semibold">${yen(x.amount)}</div>
+      <div class="sub text-xs break-words">${md(x.date)} ・ ${esc(nm(x.cardId))}${x.memo ? ' ・ ' + esc(x.memo) : ''}</div></div>
       <button class="del" onclick="delExp(${x.id})">削除</button>
     </div>`).join('') || '<div class="sub text-sm">まだ記録がありません</div>'}</div>`;
 }
@@ -160,7 +186,12 @@ function cards() {
       <div><div class="font-semibold">${esc(c.name)} <span class="sub text-xs">→ ${esc(c.bank)}</span></div>
       <div class="sub text-xs">締め ${dayLabel(c.closing)} ／ ${c.offset === 1 ? '翌月' : '翌々月'}${dayLabel(c.payDay)}払い</div></div>
       <button class="del" onclick="delCard(${c.id})">削除</button>
-    </div>`).join('') || '<div class="sub text-sm">まだ登録がありません</div>'}</div>`;
+    </div>`).join('') || '<div class="sub text-sm">まだ登録がありません</div>'}</div>
+  <h2 class="font-bold mt-6 mb-2">バックアップ</h2>
+  <div class="c"><p class="sub text-xs mb-3">データはこの端末内にだけ保存されています。履歴の消去や機種変更の前に書き出しておくと、あとで復元できます。</p>
+    <button class="btn" onclick="exportData()">データを書き出す</button>
+    <label class="btn block text-center mt-3" style="background:var(--acs);color:var(--ac)">データを読み込む<input type="file" accept=".json,application/json" style="display:none" onchange="importData(this)"></label>
+  </div>`;
 }
 
 // ===== 5. 操作（追加・削除） =====
@@ -182,6 +213,42 @@ window.addExp = () => {
   save(); go('home');
 };
 window.delExp = id => { S.exps = S.exps.filter(x => x.id !== id); save(); render(); };
+
+// ===== 6. バックアップ（書き出し・読み込み） =====
+// 書き出し：共有シート（ファイルに保存など）が使えればそれを使い、だめなら通常のダウンロード
+window.exportData = async () => {
+  const name = `card-tracker-backup-${today()}.json`;
+  const file = new File([JSON.stringify(S, null, 1)], name, { type: 'application/json' });
+  try {
+    if (navigator.canShare && navigator.canShare({ files: [file] })) { await navigator.share({ files: [file] }); return; }
+  } catch (e) { if (e.name === 'AbortError') return; }
+  const a = document.createElement('a'); a.href = URL.createObjectURL(file); a.download = name; a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+};
+// 読み込み：中身を確認してから、現在のデータを上書きして復元
+window.importData = input => {
+  const f = input.files[0]; if (!f) return;
+  const r = new FileReader();
+  r.onload = () => {
+    try {
+      const d = JSON.parse(r.result);
+      if (!Array.isArray(d.cards) || !Array.isArray(d.exps)) throw 0;
+      if (!confirm(`カード${d.cards.length}件・支出${d.exps.length}件を読み込みます。現在のデータは上書きされます。よろしいですか？`)) { input.value = ''; return; }
+      S = { cards: d.cards, exps: d.exps }; save(); go('home');
+    } catch (e) { alert('読み込めませんでした。書き出したバックアップファイルを選んでください。'); }
+    input.value = '';
+  };
+  r.readAsText(f);
+};
+
+// 左右スワイプで月を移動（ホーム画面のみ。画面の端から始まる操作はiOSの戻るジェスチャーなので除外）
+let tx = 0, ty = 0;
+document.addEventListener('touchstart', e => { tx = e.touches[0].clientX; ty = e.touches[0].clientY; }, { passive: true });
+document.addEventListener('touchend', e => {
+  if (tab !== 'home' || tx < 24 || tx > innerWidth - 24) return;
+  const dx = e.changedTouches[0].clientX - tx, dy = e.changedTouches[0].clientY - ty;
+  if (Math.abs(dx) > 60 && Math.abs(dx) > Math.abs(dy) * 1.5) mv(dx < 0 ? 1 : -1);
+}, { passive: true });
 
 render();
 </script>
